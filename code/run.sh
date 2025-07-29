@@ -16,6 +16,7 @@ date
 
 module purge
 module load miniforge
-mamba activate tidyverse_env
+mamba activate ccm_env
 
-Rscript generate_data.R
+Rscript generate_xmaps.R
+Rscript xmap_analysis.R
