@@ -9,7 +9,7 @@ setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 source("edm_utils.R")
 
 # read in data ----
-xmaps_raw <- read_csv("xmaps.csv")
+xmaps_raw <- read_csv("../data/xmaps.csv")
 
 # visualize xmaps
 ggplot(data = filter(xmaps_raw, site == 1), aes(x = LibSize, y = skill, col = xmap)) + 
@@ -35,7 +35,7 @@ ggplot(data = filter(valid_xmaps, site == 1), aes(x = LibSize, y = skill, col = 
 
 # build network --------
 # get correlation from largest library size
-networks <- lapply(unique(valid_xmaps$site), function(s){
+edge_lists <- bind_rows(lapply(unique(valid_xmaps$site), function(s){
   curr_site <- filter(valid_xmaps, site == s)
   
   final_cors <- bind_rows(lapply(unique(curr_site$xmap), function(x){
@@ -56,22 +56,12 @@ networks <- lapply(unique(valid_xmaps$site), function(s){
     data.frame(sp1 = node_1, sp2 = node_2, weight = curr_row$skill)
   })) %>%
     # remove self edges, which show species temporal autocorrelation (not meaningful)
-    filter(sp1 != sp2)
-  
-  
-  # write edgelist to csv
-  write_csv(edge_list, paste0("edge_list_", s, ".csv"))
-  
-  # build network from edge list
-  spp_network <- graph_from_edgelist(as.matrix(edge_list[, 1:2]),
-                                     directed = TRUE)
-})
+    filter(sp1 != sp2) %>%
+    mutate(site = s)
+}))
 
-# visualize network
-plot(networks[[4]],
-     edge.arrow.size = 0.5,
-     edge.arrow.width = 0.5)
-
+# write edgelist to csv
+write_csv(edge_lists, "../data/edge_lists.csv")
 
 
 
