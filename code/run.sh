@@ -1,5 +1,6 @@
 #!/bin/bash
 #SBATCH -p atesting # Partition or queue
+#SBATCH --qos=testing
 #SBATCH --job-name=generate_data # Job name
 #SBATCH --mail-type=ALL # Mail events (NONE, BEGIN, END, FAIL, ALL)
 #SBATCH --mail-user=luis.depablo@colorado.edu

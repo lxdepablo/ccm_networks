@@ -3,7 +3,8 @@ library(igraph)
 library(tidyverse)
 
 # set working directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd(dirname("/projects/lude8513/ccm_networks/code"))
 
 # source helper functions
 source("edm_utils.R")

@@ -1,15 +1,21 @@
 # load libraries
 library(tidyverse)
 library(odin)
-library(GPEDM) # for empirical dynamic modeling (devtools::install_github("tanyalrogers/GPEDM"))
+#library(GPEDM) # for empirical dynamic modeling (devtools::install_github("tanyalrogers/GPEDM"))
 library(rEDM)
 library(janitor)
 
 # set working directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd("/projects/lude8513/ccm_networks/code/")
+print(getwd())
 
 # load helper functions
+print("before source")
+
 source("edm_utils.R")
+
+print("after source")
 
 # load GOM data
 gom_raw <- read_csv("../data/experimental_data_stacked.csv")
