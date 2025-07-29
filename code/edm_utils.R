@@ -1,4 +1,5 @@
-
+library(furrr)
+library(tictoc)
 
 # generalized lotka volterra
 gLV_model <- odin::odin({
@@ -46,26 +47,6 @@ block_bootstrap <- function(df, block_size = 10) {
   return(new_data)
 }
 
-compute_ccm_skill <- function(df,
-                              lib_column,
-                              target_column,
-                              E = 2,
-                              lib_sizes = seq(1, nrow(df)-2, by = 1)) {
-  # Run CCM
-  ccm_out <- ccm(df,
-                 E = E,
-                 lib_sizes = lib_sizes,
-                 columns = lib_column,
-                 target = target_column,
-                 sample = 50)
-  # Typically we consider the skill (rho) at the largest library size
-  max_lib <- max(lib_sizes)
-  subset_out <- ccm_out[ccm_out$lib_size == max_lib, ]
-  mean_rho <- mean(subset_out$rho)
-  
-  return(mean_rho)
-}
-
 # function to calculate network stats
 calc_network_stats <- function(network){
   # number of nodes and edges
@@ -97,16 +78,19 @@ calc_network_stats <- function(network){
 }
 
 # function to calculate xmaps for every pair of species in a dataframe
-calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
+par_calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
   all_cols <- colnames(ccm_data)[2:47]
   test_cols <- all_cols[1:ncols]
   
   # set maximum possible libsize for any CCM run
   max_possible_libsize <- nrow(ccm_data) - 2
   
+  # set up parallel session
+  plan(multisession)
+  
   # try CCM on every pair of species
-  all_xmaps <- do.call(cbind, lapply(1:(length(test_cols)-1), function(i){
-    do.call(cbind, lapply((i+1):length(test_cols), function(j){
+  all_xmaps <- bind_cols(future_map(1:(length(test_cols)-1), function(i){
+    bind_cols(lapply((i+1):length(test_cols), function(j){
       # find optimal embedding dimension
       e_df <- EmbedDimension(
         dataFrame = ccm_data,
@@ -148,6 +132,66 @@ calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
     }))
   }))
   
+  plan(sequential)
+  
+  # reshape to long format
+  all_xmaps_long <- all_xmaps[ , !grepl("\\.1$", names(all_xmaps))] %>%
+    mutate(LibSize = 1:nrow(.)) %>%
+    relocate(LibSize) %>%
+    pivot_longer(cols = -LibSize, names_to = "xmap", values_to = "skill")
+}
+
+calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
+  all_cols <- colnames(ccm_data)[2:47]
+  test_cols <- all_cols[1:ncols]
+  
+  # set maximum possible libsize for any CCM run
+  max_possible_libsize <- nrow(ccm_data) - 2
+  
+  # try CCM on every pair of species
+  all_xmaps <- bind_cols(lapply(1:(length(test_cols)-1), function(i){
+    bind_cols(lapply((i+1):length(test_cols), function(j){
+      # find optimal embedding dimension
+      e_df <- EmbedDimension(
+        dataFrame = ccm_data,
+        lib = c(1, nrow(ccm_data) - 2),
+        pred = c(1, nrow(ccm_data) - 2),
+        columns = test_cols[i],
+        target = test_cols[j],
+        maxE = 10
+      )
+      
+      # select E with highest rho
+      e_opt <- e_df$E[which.max(e_df$rho)]
+      max_libsize <- nrow(ccm_data) - e_opt - 1
+      lib_sizes <- seq(1, max_libsize, by = 1)
+      
+      # run CCM
+      curr_xmap <- CCM(
+        dataFrame = ccm_data,
+        E = e_opt,
+        columns = test_cols[i],
+        target = test_cols[j],
+        libSizes = lib_sizes,
+        sample = 100,
+        random = TRUE
+      )
+      
+      # drop libSize column
+      skill_vals <- curr_xmap[, -1]
+      
+      # pad with NA if needed
+      if (nrow(skill_vals) < max_possible_libsize) {
+        pad_n <- max_possible_libsize - nrow(skill_vals)
+        padding <- matrix(NA, nrow = pad_n, ncol = 2)
+        colnames(padding) <- colnames(skill_vals)
+        skill_vals <- rbind(skill_vals, padding)
+      }
+      
+      skill_vals
+    }))
+  }))
+
   # reshape to long format
   all_xmaps_long <- all_xmaps[ , !grepl("\\.1$", names(all_xmaps))] %>%
     mutate(LibSize = 1:nrow(.)) %>%
