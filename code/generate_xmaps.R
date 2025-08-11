@@ -26,13 +26,14 @@ all_sites_xmaps <- bind_rows(lapply(unique(gom_raw$site), function(s){
     filter(!(metric_type == "count" & species == "MYED")) %>%
     # combine same-species observations within survey groups
     group_by(survey_group, species) %>%
-    summarize(value_scaled = sum(value_scaled)) %>%
+    summarize(value_scaled = sum(value_scaled, na.rm = T)) %>%
     # drop unneeded columns
     select(c(survey_group, species, value_scaled)) %>%
     # make wide
     pivot_wider(id_cols = survey_group, names_from = species, values_from = value_scaled) %>%
-    # add time column
-    mutate(date = my(survey_group))
+    # add time column and backfill zeroes
+    mutate(date = my(survey_group)) %>%
+    replace(is.na(.), 0)
   
   # now do CCM
   ccm_data <- curr_site_wide %>%

@@ -44,7 +44,7 @@ network_stats <- bind_rows(lapply(unique(gom_raw$site), function(s){
 }))
 
 # visualize networks
-spp_network <- graph_from_edgelist(as.matrix(filter(edge_lists, site == 4)[, 1:2]),
+spp_network <- graph_from_edgelist(as.matrix(filter(edge_lists, site == 5)[, 1:2]),
                                    directed = TRUE)
 plot(spp_network)
 
