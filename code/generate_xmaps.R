@@ -20,11 +20,10 @@ gom_raw <- read_csv("../data/experimental_data_stacked.csv")
 all_sites_xmaps <- bind_rows(lapply(unique(gom_raw$site), function(s){
   # wrangle data
   curr_site_wide <- gom_raw %>%
-    # just use 1 site for now
     # use only control plots
     filter(site == s, plot == "C") %>%
     # exclude mobile species
-    filter(metric_type == "percent cover") %>%
+    #filter(metric_type == "percent cover") %>%
     # combine same-species observations within survey groups
     group_by(survey_group, species) %>%
     summarize(value_scaled = sum(value_scaled)) %>%

@@ -7,7 +7,7 @@
 #SBATCH --nodes=1 # Only use a single node
 #SBATCH --ntasks=8 # Run on n CPUs
 #SBATCH --mem=16gb # Memory limit
-#SBATCH --time=0:10:00 # Time limit hrs:min:sec
+#SBATCH --time=0:30:00 # Time limit hrs:min:sec
 #SBATCH --output=log.out # Standard output and error log
 #SBATCH --error=log.err # %j inserts job number
 
