@@ -6,7 +6,7 @@ library(rEDM)
 library(janitor)
 
 # set working directory
-#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 setwd("/projects/lude8513/ccm_networks/code/")
 print(getwd())
 
@@ -22,8 +22,8 @@ all_sites_xmaps <- bind_rows(lapply(unique(gom_raw$site), function(s){
   curr_site_wide <- gom_raw %>%
     # use only control plots
     filter(site == s, plot == "C") %>%
-    # exclude mobile species
-    #filter(metric_type == "percent cover") %>%
+    # exclude double-counted species
+    filter(!(metric_type == "count" & species == "MYED")) %>%
     # combine same-species observations within survey groups
     group_by(survey_group, species) %>%
     summarize(value_scaled = sum(value_scaled)) %>%
