@@ -3,7 +3,7 @@ library(igraph)
 library(tidyverse)
 
 # set working directory
-#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
 setwd(dirname("/projects/lude8513/ccm_networks/code"))
 
 # source helper functions
@@ -43,8 +43,13 @@ network_stats <- bind_rows(lapply(unique(gom_raw$site), function(s){
     mutate(site = s)
 }))
 
+# visualize networks
+spp_network <- graph_from_edgelist(as.matrix(filter(edge_lists, site == 4)[, 1:2]),
+                                   directed = TRUE)
+plot(spp_network)
+
 # fit models ----
-model <- lm(cv ~ mean_in_deg + mean_out_deg + connectance + relative_ascendancy, data = network_stats, na.action = na.omit)
+model <- lm(cv ~ mean_in_deg + connectance + relative_ascendancy, data = network_stats, na.action = na.omit)
 summary(model)
 
 
