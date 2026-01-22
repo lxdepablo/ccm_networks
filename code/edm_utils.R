@@ -47,39 +47,67 @@ block_bootstrap <- function(df, block_size = 10) {
   return(new_data)
 }
 
-# function to calculate network stats
+# Core network stats for a single directed graph
 calc_network_stats <- function(network){
-  # number of nodes and edges
   S <- vcount(network)
   L <- ecount(network)
   
-  # mean in-degree and out-degree
-  mean_in_degree <- mean(degree(network, mode = "in"))
-  mean_out_degree <- mean(degree(network, mode = "out"))
+  mean_in_degree  <- if (S > 0) mean(degree(network, mode = "in"))  else NA_real_
+  mean_out_degree <- if (S > 0) mean(degree(network, mode = "out")) else NA_real_
   
-  # connectance: proportion of possible links realized
-  connectance <- L / (S * (S - 1))  # excludes self-loops
+  # Connectance (directed, excludes self-loops)
+  denom <- S * (S - 1)
+  connectance <- if (denom > 0) L / denom else NA_real_
   
-  # relative ascendancy (simplified version)
-  # from Ulanowicz: A/C = ascendancy / capacity
-  P <- as_adjacency_matrix(network, attr = NULL, sparse = FALSE)
-  P <- P / sum(P)  # normalize to make it a flow matrix
-  P[P == 0] <- NA
-  ascendancy <- -sum(P * log(P), na.rm = TRUE)
-  capacity <- log(S^2)
-  rel_asc <- ascendancy / capacity
+  # Reciprocity (fraction of edges that are mutual)
+  reciprocity_val <- if (L > 0) reciprocity(network, mode = "default") else NA_real_
+  
+  # Feedback/cycle edge fraction: edges whose endpoints are both in SCCs of size > 1
+  feedback_edge_frac <- if (L == 0) NA_real_ else {
+    scc <- components(network, mode = "strong")
+    cycV <- which(scc$csize[scc$membership] > 1)
+    ed <- as_edgelist(network, names = FALSE)
+    mean(ed[,1] %in% cycV & ed[,2] %in% cycV)
+  }
+  
+  # Relative ascendancy (simple Shannon-style version on normalized adjacency)
+  P <- as.matrix(as_adjacency_matrix(network, sparse = FALSE))
+  tot <- sum(P)
+  relative_ascendancy <- if (tot > 0 && S > 1) {
+    Pn <- P / tot
+    Pn[Pn == 0] <- NA
+    ascendancy <- -sum(Pn * log(Pn), na.rm = TRUE)
+    capacity   <- log(S^2)
+    if (capacity > 0) ascendancy / capacity else NA_real_
+  } else NA_real_
   
   data.frame(
-    mean_in_deg = mean_in_degree,
+    S = S,
+    L = L,
+    mean_in_deg  = mean_in_degree,
     mean_out_deg = mean_out_degree,
-    connectance = connectance,
-    relative_ascendancy = rel_asc
+    connectance  = connectance,
+    reciprocity  = reciprocity_val,
+    feedback_edge_frac = feedback_edge_frac,
+    relative_ascendancy = relative_ascendancy,
+    row.names = NULL
   )
 }
 
-# function to calculate xmaps for every pair of species in a dataframe
+# centrality alignment between two graphs on the shared node set (spearman)
+centrality_alignment <- function(g1, g2, centrality_fun = function(g) degree(g, mode = "out")){
+  nms <- intersect(V(g1)$name, V(g2)$name)
+  if (length(nms) < 2) return(NA_real_)
+  g1s <- induced_subgraph(g1, vids = nms)
+  g2s <- induced_subgraph(g2, vids = nms)
+  x <- centrality_fun(g1s); x <- x[nms]
+  y <- centrality_fun(g2s); y <- y[nms]
+  suppressWarnings(cor(x, y, method = "spearman", use = "complete.obs"))
+}
+
+# parallelized function to calculate xmaps for every pair of species in a dataframe
 par_calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
-  test_cols <- colnames(ccm_data)[1:ncols]
+  test_cols <- colnames(ccm_data)[2:ncols]
   
   # set maximum possible libsize for any CCM run
   max_possible_libsize <- nrow(ccm_data) - 2
@@ -241,9 +269,62 @@ filter_xmaps <- function(xmaps){
     filter(xmap %in% valid_xmap_list$xmap)
 }
 
+# find best theta value for S-map
+find_theta <- function(smap_data, target, predictors, lib, pred){
+  theta_grid <- seq(0, 8, by = 0.5)
+  
+  theta_fit <- map_dfr(theta_grid, function(th) {
+    pn <- PredictNonlinear(
+      dataFrame = smap_data,
+      lib       = lib,
+      pred      = pred,
+      embedded  = TRUE,
+      columns   = paste(predictors, collapse = " "),
+      target    = target,
+      E         = length(predictors),
+      Tp        = 1,
+      theta     = th
+    )
+    
+    tibble(theta = th, rho = pn$rho)
+  })
+  
+  best_theta <- theta_fit %>%
+    filter(!is.na(rho)) %>%
+    slice_max(rho, n = 1, with_ties = FALSE) %>%
+    pull(theta)
+}
 
-
-
+# do S-map for one target species and its set of predictors
+do_smap <- function(smap_data, target, predictors){
+  # define library/pred ranges
+  N <- nrow(smap_data)
+  lib  <- paste0("1 ", N)
+  pred <- paste0("1 ", N)
+  
+  # find optimal theta value
+  theta <- find_theta(smap_data, target, predictors, lib, pred)
+  
+  # fit smap
+  smap_fit <- SMap(
+    dataFrame = smap_data,
+    lib       = lib,
+    pred      = pred,
+    embedded  = TRUE,
+    columns   = paste(predictors, collapse = " "),
+    target    = target,
+    E         = length(predictors),
+    Tp        = 1,
+    theta     = theta
+  )
+  
+  # extract interaction strengths
+  coefs <- smap_fit$coefficients
+  
+  coefs_long <- coefs %>%
+    select(-C0) %>%
+    pivot_longer(cols = -date)
+}
 
 
 
