@@ -79,7 +79,7 @@ calc_network_stats <- function(network){
 
 # function to calculate xmaps for every pair of species in a dataframe
 par_calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
-  test_cols <- colnames(ccm_data)[1:ncols]
+  test_cols <- colnames(ccm_data)[2:ncols]
   
   # set maximum possible libsize for any CCM run
   max_possible_libsize <- nrow(ccm_data) - 2
