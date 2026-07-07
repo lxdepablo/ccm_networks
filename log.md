@@ -21,29 +21,45 @@ be compared directly:
 edges each pruning step removed - bootstrap pruning and multiPCM pruning catch different
 kinds of false positives (see below), so counts alone would be misleading.
 
-## Important pre-existing finding: edge orientation
+## Edge orientation fix
 
 `par_calc_all_xmaps()`/`CCM()` name their output columns `"A:B"` for
-`CCM(columns = A, target = B)` - i.e. "use A's manifold to predict B". `xmap_analysis.R`
-splits that string on `:` and records the edge as `sp1 (= A) -> sp2 (= B)`.
+`CCM(columns = A, target = B)` - i.e. "use A's manifold to predict B". `xmap_analysis.R` used
+to split that string on `:` and record the edge as `sp1 (= A) -> sp2 (= B)`.
 
 I verified empirically (simulated `x` autonomous, `y` driven by `x`, i.e. true `x -> y`) that
 a high `"A:B"` score means **B's dynamics leave a footprint in A** - CCM's classic result
 that the *effect's* manifold reconstructs the *cause*. In the test system, `"y:x"` was high
 (≈0.83-0.96) and `"x:y"` was low (≈0.2-0.4), and the true relationship was `x -> y`. So a high
-`"A:B"` score actually supports the causal claim **B -> A**, the reverse of how
-`xmap_analysis.R` draws the edge (`A -> B`).
+`"A:B"` score actually supports the causal claim **B -> A**, the reverse of how the edge used
+to get drawn (`A -> B`).
 
-This looks like a pre-existing convention issue in the pipeline (note `network_analysis.R`
-already applies `reverse_edges()` to the metaweb, but not to the CCM-derived network, which
-may or may not be intentional). **I did not change it** - fixing edge orientation across the
-whole pipeline is a separate decision outside this task's scope, and it might already be
-understood/compensated for downstream. All new code in `edm_utils.R` is written in terms of
-`from_col` (= `sp1`, the manifold/`columns` variable) and `to_col` (= `sp2`, the
-target/reconstructed variable) - i.e. matching `edge_lists.csv` literally - so it plugs into
-the existing edge lists regardless of which way the true causal arrow points. Worth a
-deliberate decision from whoever owns this repo before drawing causal conclusions from the
-network's edge directions.
+**Fixed**: `xmap_analysis.R` now records the edge as `sp1 (= B = cause) -> sp2 (= A = effect)`
+- i.e. `edge_lists.csv`'s `sp1 -> sp2` now points in the direction of causality, not the raw
+`"columns:target"` order. Re-validated on the same simulated chain (`x -> y -> z` + an
+independent `w`) after the fix: edges now come out as `x -> y`, `y -> z` (both direct, correct
+orientation) and `x -> z` (the correctly-identified transitive/indirect edge) - previously
+these came out reversed (`y -> x`, `z -> y`, `z -> x`).
+
+This also resolves a related inconsistency: `do_smap.R` already treats `sp1` as the "driver"
+of `sp2` (`these_drivers <- filter(this_site, sp2 == this_target)$sp1`) when fitting its
+multivariate S-map - i.e. it already assumed `sp1 -> sp2` meant "`sp1` causes `sp2`". Before
+this fix that assumption was actually backwards relative to what `edge_lists.csv` encoded; now
+it's correct, with no change needed to `do_smap.R` itself. `network_analysis.R` similarly
+needed no changes - it just reads `edge_lists.csv` and builds a directed graph from `sp1`/
+`sp2`, so it now produces a correctly-oriented causal network automatically. (Note
+`network_analysis.R` separately applies `reverse_edges()` to the *metaweb* - that's an
+unrelated, pre-existing convention for the trophic metaweb's own edge direction, not touched
+here.)
+
+Since `sp1`/`sp2` now mean cause/effect rather than columns/target, the pruning functions in
+`edm_utils.R` (`prune_indirect_edges()`, `prune_nonsignificant_edges()`) needed a
+corresponding fix: they use `sp1`/`sp2` as literal cause/effect for graph-topology work
+(finding 2-hop mediators), but must still call `multi_pcm()`/`bootstrap_ccm_significance()`
+with the manifold variable and reconstructed variable in the right (reversed) order -
+`from_col = effect`, `to_col = cause` - since that's the actual direction the underlying
+`Simplex` call needs to run in. Getting this backwards would silently retest the wrong
+direction. Both were updated and re-validated (see below).
 
 ## Bootstrap pruning (`bootstrap_ccm_significance()`, `prune_nonsignificant_edges()`)
 
@@ -91,14 +107,19 @@ are exposed as parameters for HPC vs. local tuning.
 ### What it does
 
 Implements Zhang et al. 2025's two-phase MXMap framework: phase 1 is the existing pairwise
-CCM graph; phase 2 (`prune_indirect_edges()`) finds, for each edge `from_col -> to_col`,
-other node(s) `k` already sitting on a 2-hop path (`from_col -> k` and `k -> to_col` both
-present in the current graph) and runs `multi_pcm()` to decide whether the edge is direct or
-fully explained by that indirect path.
+CCM graph (`sp1 = cause -> sp2 = effect`, per the edge orientation fix above); phase 2
+(`prune_indirect_edges()`) finds, for each edge `cause -> effect`, other node(s) `k` already
+sitting on a 2-hop causal path (`cause -> k` and `k -> effect` both present in the current
+graph) and runs `multi_pcm()` to decide whether the edge is direct or fully explained by that
+indirect path. `multi_pcm()` itself works in *Simplex* terms, not causal-graph terms - it
+takes `from_col` (the manifold/columns variable) and `to_col` (the variable being
+reconstructed), so it's called as `multi_pcm(..., from_col = effect, to_col = cause, conds,
+...)` - reconstructing the cause from the effect's manifold, matching how the edge's apparent
+CCM score was computed in the first place.
 
 `multi_pcm()` is a genuine **two-hop** composition, matching Eq. 7 of the paper exactly:
 
-1. apparent: `to_col` reconstructed from `from_col`'s manifold
+1. apparent: `to_col` (cause) reconstructed from `from_col`'s (effect's) manifold
 2. reconstruct each intermediate *from `from_col`'s manifold* (the X2 → Conds hop)
 3. conditioned: `to_col` reconstructed from that *reconstructed* conds block (the Conds → X1
    hop) - **not** from the true conds values directly, which would over-prune real direct
@@ -158,6 +179,19 @@ chaotic variables is near zero even under strong coupling (the "mirage correlati
 phenomenon CCM exists to route around), so partialling on it can't move a partial correlation
 computed from a mirage-correlated conditioning variable. The paper never conditions on raw
 values for this reason - always on a cross-map reconstruction, as implemented above.
+
+**Post-orientation-fix re-check**: the table above was produced by calling `multi_pcm()`/
+`xmap_reconstruct()` directly with explicit `from_col`/`to_col`, independent of the
+`sp1`/`sp2` edge-list convention, so it wasn't affected by the edge-orientation bug or its
+fix. After fixing `prune_indirect_edges()` to map `sp1`/`sp2` (cause/effect) onto
+`from_col`/`to_col` in the (reversed) order `multi_pcm()` actually needs, I re-ran the full
+chain simulation end-to-end through the *fixed* pipeline functions (edges built the same way
+`xmap_analysis.R` now builds them, then pruned via `prune_indirect_edges()`/
+`prune_nonsignificant_edges()`): edges came out correctly oriented (`x -> y`, `y -> z` direct;
+`x -> z` transitive) and reproduced the same ratios as above (`x -> y` ratio ≈0.999, `x -> z`
+ratio ≈0.991) and the same bootstrap significance results (all four edges significant,
+p<0.01) - confirming the fix didn't change the underlying math, only which physical variables
+get passed to it.
 
 ### Real-data limitation (documented, not "fixed")
 
@@ -220,7 +254,8 @@ data wrangling or re-run CCM.
 - `code/generate_xmaps.R` - uses `prep_site_ccm_data()`; saves per-site wide `ccm_data` to
   `data/ccm_data/site_<n>.csv`
 - `code/xmap_analysis.R` - adds the bootstrap and multivariate pruning stages, writing
-  `data/edge_lists_bootstrap.csv` and `data/edge_lists_multivariate.csv`
+  `data/edge_lists_bootstrap.csv` and `data/edge_lists_multivariate.csv`; fixes edge
+  orientation so `sp1 -> sp2` points in the direction of causality (see above)
 - `code/compare_networks.R` - new: compares the three networks, reporting which edges each
   pruning step removed and per-site network stats
 - `code/network_analysis.R`, `code/sst_scripts/pull_sst.R` - pre-existing uncommitted changes

@@ -6,14 +6,19 @@ library(janitor)
 library(furrr)
 
 # set working directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd("/projects/lude8513/ccm_networks/code/")
 
 # source helper functions ----
 source("edm_utils.R")
 
 # read in data ----
 gom_raw <- read_csv("../data/experimental_data_stacked.csv")
-edge_lists <- read_csv("../data/edge_lists.csv")
+# use the final pruned edge list (bootstrap significance pruning, then
+# multiPCM indirect-edge pruning on top - see xmap_analysis.R/log.md) rather
+# than the raw pairwise edges, so S-map interaction strengths are only fit
+# for edges that survived both false-positive checks.
+edge_lists <- read_csv("../data/edge_lists_multivariate.csv")
 
 # iterate over all sites
 all_smap_coefs <- bind_rows(lapply(unique(edge_lists$site), function(s){
@@ -89,6 +94,8 @@ all_smap_coefs <- bind_rows(lapply(unique(edge_lists$site), function(s){
   
   this_site_coefs
 }))
+
+write_csv(all_smap_coefs, "../data/smap_coefs.csv")
 
 # plot interactions strengths
 ggplot(data=filter(all_smap_coefs, site == 1), aes(x=date, y = value, col = name)) +

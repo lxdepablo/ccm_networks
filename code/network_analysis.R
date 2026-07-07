@@ -1,10 +1,11 @@
 # load libraries
 library(igraph)
 library(tidyverse)
+library(janitor)
 
 # set working directory
-setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
-setwd(dirname("/projects/lude8513/ccm_networks/code"))
+#setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+setwd("/projects/lude8513/ccm_networks/code/")
 
 # source helper functions
 source("edm_utils.R")
@@ -53,6 +54,8 @@ network_stats <- bind_rows(lapply(unique(gom_raw$site), function(s){
     mutate(site = s)
 }))
 
+write_csv(network_stats, "../data/network_stats.csv")
+
 # build causal metaweb
 causal_metaweb <- unique(dplyr::select(edge_lists, c(sp1, sp2)))
 
@@ -63,6 +66,14 @@ spp_network <- graph_from_edgelist(as.matrix(causal_metaweb[, 1:2]),
 # calculate stats for metaweb and causal web
 causal_metaweb_stats <- calc_network_stats(spp_network)
 trophic_metaweb_stats <- calc_network_stats(metaweb)
+
+write_csv(
+  bind_rows(
+    mutate(causal_metaweb_stats, network = "causal_metaweb"),
+    mutate(trophic_metaweb_stats, network = "trophic_metaweb")
+  ) %>% relocate(network),
+  "../data/metaweb_vs_causal_stats.csv"
+)
 
 # compare keystone species
 # by degree
@@ -94,7 +105,7 @@ plot(
 
 # plot subgraph
 # pick the focal node
-focal <- "fudi_canopy"
+focal <- "sst"
 
 # get all neighbors (both in and out)
 nbrs <- neighbors(spp_network, focal, mode = "all")
@@ -159,6 +170,24 @@ plot(
   xlim = c(-4,4.1),
   ylim = c(-4.5,4.5)
 )
+
+# pick out n most common species
+n_species <- 10
+
+top_spp <- gom_raw %>%
+  # filter out just control plots
+  # drop non biotic species
+  filter(plot == "C",
+         !(species  %in% c("bare rock", "water"))) %>%
+  # count observations for each species
+  count(species, sort = TRUE) %>% 
+  slice_head(n = n_species) %>%
+  mutate(species = make_clean_names(species))
+
+# make subgraph
+top_subweb <- induced_subgraph(spp_network, vids = top_spp$species)
+
+plot(top_subweb)
 
 # fit models ----
 model <- lm(cv ~ mean_in_deg + connectance + relative_ascendancy, data = network_stats, na.action = na.omit)
