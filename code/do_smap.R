@@ -14,7 +14,11 @@ source("edm_utils.R")
 
 # read in data ----
 gom_raw <- read_csv("../data/experimental_data_stacked.csv")
-edge_lists <- read_csv("../data/edge_lists.csv")
+# use the final pruned edge list (bootstrap significance pruning, then
+# multiPCM indirect-edge pruning on top - see xmap_analysis.R/log.md) rather
+# than the raw pairwise edges, so S-map interaction strengths are only fit
+# for edges that survived both false-positive checks.
+edge_lists <- read_csv("../data/edge_lists_multivariate.csv")
 
 # iterate over all sites
 all_smap_coefs <- bind_rows(lapply(unique(edge_lists$site), function(s){
