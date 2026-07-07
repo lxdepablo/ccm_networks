@@ -190,7 +190,8 @@ par_calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
         pred = c(1, nrow(ccm_data) - 2),
         columns = test_cols[i],
         target = test_cols[j],
-        maxE = 10
+        maxE = 10,
+        showPlot = FALSE
       )
       
       # select E with highest rho
@@ -250,7 +251,8 @@ calc_all_xmaps <- function(ccm_data, ncols = (ncol(ccm_data)-1)){
         pred = c(1, nrow(ccm_data) - 2),
         columns = test_cols[i],
         target = test_cols[j],
-        maxE = 10
+        maxE = 10,
+        showPlot = FALSE
       )
       
       # select E with highest rho
@@ -371,7 +373,8 @@ get_optimal_E <- function(data, from_col, to_col, maxE = 10, lib = NULL, pred = 
     pred = pred,
     columns = from_col,
     target = to_col,
-    maxE = maxE
+    maxE = maxE,
+    showPlot = FALSE
   )
 
   e_df$E[which.max(e_df$rho)]
@@ -537,18 +540,21 @@ multi_pcm <- function(data, from_col, to_col, conds, E = NULL, tau = 1,
 # recalibrated for this system/dataset (see log.md and Appendix C of the
 # paper, which makes the same point) - it is exposed as a parameter, not a
 # fixed constant, for exactly that reason.
+#
+# Parallelized (future_map()/plan(multisession), matching par_calc_all_xmaps()
+# and do_smap.R's existing convention) over edges within this call - i.e.
+# parallel across a site's surviving edges, sequential across sites (the
+# calling lapply() over sites in xmap_analysis.R is left as-is), avoiding
+# nested parallelism.
 prune_indirect_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
                                   gamma_threshold = 0.45, max_conds = 3, knn = 10) {
-  edge_df$ratio <- NA_real_
-  edge_df$rho_all <- NA_real_
-  edge_df$rho_direct <- NA_real_
-  edge_df$pruned <- FALSE
-  edge_df$n_conds <- 0L
-
-  for (i in seq_len(nrow(edge_df))) {
+  # intermediates (2-hop mediators) depend on the *whole* edge_df, so this
+  # has to happen before dispatching in parallel - it's cheap pure-R lookup,
+  # not worth parallelizing itself
+  conds_list <- lapply(seq_len(nrow(edge_df)), function(i) {
     # sp1/sp2 are true cause/effect (edge_lists.csv is now drawn in the
     # direction of causality - see the NOTE ON EDGE ORIENTATION above), so
-    # graph topology (finding mediators) uses cause/effect directly...
+    # graph topology (finding mediators) uses cause/effect directly
     cause <- edge_df$sp1[i]
     effect <- edge_df$sp2[i]
 
@@ -559,24 +565,32 @@ prune_indirect_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
     conds <- intersect(cause_children, effect_parents)
     conds <- setdiff(conds, c(cause, effect))
     if (length(conds) > max_conds) conds <- conds[seq_len(max_conds)]
+    conds
+  })
+  edge_df$n_conds <- lengths(conds_list)
 
-    if (length(conds) == 0) next
+  plan(multisession)
+  results <- future_map(seq_len(nrow(edge_df)), function(i) {
+    conds <- conds_list[[i]]
+    if (length(conds) == 0) {
+      return(list(rho_all = NA_real_, rho_direct = NA_real_, ratio = NA_real_))
+    }
 
-    edge_df$n_conds[i] <- length(conds)
-
-    # ...but multi_pcm()'s Simplex calls must reconstruct the cause from the
+    # multi_pcm()'s Simplex calls must reconstruct the cause from the
     # effect's manifold (from_col = effect, to_col = cause), matching how
     # this edge's apparent CCM score was actually computed.
-    res <- tryCatch(
-      multi_pcm(ccm_data, from_col = effect, to_col = cause, conds, E = E_default, tau = tau, knn = knn),
+    tryCatch(
+      multi_pcm(ccm_data, from_col = edge_df$sp2[i], to_col = edge_df$sp1[i],
+                conds, E = E_default, tau = tau, knn = knn),
       error = function(e) list(rho_all = NA_real_, rho_direct = NA_real_, ratio = NA_real_)
     )
+  }, .options = furrr_options(seed = TRUE))
+  plan(sequential)
 
-    edge_df$rho_all[i] <- res$rho_all
-    edge_df$rho_direct[i] <- res$rho_direct
-    edge_df$ratio[i] <- res$ratio
-    edge_df$pruned[i] <- !is.na(res$ratio) && res$ratio < gamma_threshold
-  }
+  edge_df$rho_all <- map_dbl(results, "rho_all")
+  edge_df$rho_direct <- map_dbl(results, "rho_direct")
+  edge_df$ratio <- map_dbl(results, "ratio")
+  edge_df$pruned <- !is.na(edge_df$ratio) & edge_df$ratio < gamma_threshold
 
   edge_df
 }
@@ -661,33 +675,34 @@ bootstrap_ccm_significance <- function(data, from_col, to_col, E = NULL, tau = 1
 # edge list and flag/prune the ones that don't hold up. Meant to run
 # alongside/after filter_xmaps() (convergence-based screening) as an
 # additional, independent false-positive check - not a replacement.
+#
+# Parallelized (future_map()/plan(multisession), matching par_calc_all_xmaps()
+# and do_smap.R's existing convention) over edges within this call - this is
+# the most expensive step per edge (n_boot Simplex reruns each), so it
+# benefits the most from spreading edges across cores. Parallel across a
+# site's edges, sequential across sites (as in prune_indirect_edges()).
 prune_nonsignificant_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
                                         n_boot = 200, block_size = 10,
                                         alpha = 0.05, seed = NULL) {
-  edge_df$rho_obs <- NA_real_
-  edge_df$p_value <- NA_real_
-  edge_df$significant <- NA
-  edge_df$pruned <- FALSE
-
-  for (i in seq_len(nrow(edge_df))) {
+  plan(multisession)
+  results <- future_map(seq_len(nrow(edge_df)), function(i) {
     # sp1/sp2 are cause/effect (see NOTE ON EDGE ORIENTATION above); the
     # Simplex call needs to reconstruct the cause from the effect's manifold,
     # i.e. from_col = effect (sp2), to_col = cause (sp1).
-    cause <- edge_df$sp1[i]
-    effect <- edge_df$sp2[i]
-
-    res <- tryCatch(
-      bootstrap_ccm_significance(ccm_data, from_col = effect, to_col = cause, E = E_default, tau = tau,
+    tryCatch(
+      bootstrap_ccm_significance(ccm_data, from_col = edge_df$sp2[i], to_col = edge_df$sp1[i],
+                                  E = E_default, tau = tau,
                                   n_boot = n_boot, block_size = block_size,
                                   alpha = alpha, seed = seed),
       error = function(e) list(rho_obs = NA_real_, p_value = NA_real_, significant = NA)
     )
+  }, .options = furrr_options(seed = TRUE))
+  plan(sequential)
 
-    edge_df$rho_obs[i] <- res$rho_obs
-    edge_df$p_value[i] <- res$p_value
-    edge_df$significant[i] <- res$significant
-    edge_df$pruned[i] <- isFALSE(res$significant)
-  }
+  edge_df$rho_obs <- map_dbl(results, "rho_obs")
+  edge_df$p_value <- map_dbl(results, "p_value")
+  edge_df$significant <- map_lgl(results, "significant")
+  edge_df$pruned <- map_lgl(results, ~ isFALSE(.x$significant))
 
   edge_df
 }
