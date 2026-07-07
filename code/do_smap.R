@@ -95,6 +95,8 @@ all_smap_coefs <- bind_rows(lapply(unique(edge_lists$site), function(s){
   this_site_coefs
 }))
 
+write_csv(all_smap_coefs, "../data/smap_coefs.csv")
+
 # plot interactions strengths
 ggplot(data=filter(all_smap_coefs, site == 1), aes(x=date, y = value, col = name)) +
   geom_line() +

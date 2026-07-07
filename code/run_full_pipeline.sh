@@ -37,11 +37,14 @@ date
 Rscript xmap_analysis.R
 date
 
-# 3. multivariate S-map interaction strengths along the (raw) edge list.
+# 3. multivariate S-map interaction strengths along the final (multiPCM-
+#    pruned) edge list. Writes data/smap_coefs.csv.
 Rscript do_smap.R
 date
 
-# 4. network stats/plots: causal network(s) vs. the trophic metaweb.
+# 4. network stats/plots: causal network(s) vs. the trophic metaweb. Writes
+#    data/network_stats.csv (per-site causal network stats) and
+#    data/metaweb_vs_causal_stats.csv (causal metaweb vs. trophic metaweb).
 Rscript network_analysis.R
 date
 

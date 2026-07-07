@@ -54,6 +54,8 @@ network_stats <- bind_rows(lapply(unique(gom_raw$site), function(s){
     mutate(site = s)
 }))
 
+write_csv(network_stats, "../data/network_stats.csv")
+
 # build causal metaweb
 causal_metaweb <- unique(dplyr::select(edge_lists, c(sp1, sp2)))
 
@@ -64,6 +66,14 @@ spp_network <- graph_from_edgelist(as.matrix(causal_metaweb[, 1:2]),
 # calculate stats for metaweb and causal web
 causal_metaweb_stats <- calc_network_stats(spp_network)
 trophic_metaweb_stats <- calc_network_stats(metaweb)
+
+write_csv(
+  bind_rows(
+    mutate(causal_metaweb_stats, network = "causal_metaweb"),
+    mutate(trophic_metaweb_stats, network = "trophic_metaweb")
+  ) %>% relocate(network),
+  "../data/metaweb_vs_causal_stats.csv"
+)
 
 # compare keystone species
 # by degree
