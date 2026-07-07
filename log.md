@@ -102,6 +102,19 @@ most likely to be slow at full scale; `xmap_analysis.R` only runs it on edges th
 survived `filter_xmaps()`'s convergence screen, not every pair, but `n_boot` and `block_size`
 are exposed as parameters for HPC vs. local tuning.
 
+Both `prune_nonsignificant_edges()` and `prune_indirect_edges()` (below) parallelize across a
+site's edges via `future_map()`/`plan(multisession)`, matching the convention already used by
+`par_calc_all_xmaps()` and `do_smap.R` - parallel within a site, sequential across sites
+(unchanged in `xmap_analysis.R`), so there's no nested parallelism to manage. Re-validated
+after parallelizing: identical results to the serial version on the simulated chain.
+
+While parallelizing, found and fixed an unrelated inefficiency: `EmbedDimension()` defaults to
+`showPlot = TRUE`, so every parallel worker was opening a graphics device (visible as
+"MultisessionFuture ... opened the default graphics device" warnings, and would otherwise
+leave orphaned `Rplots.pdf` files scattered across worker processes on the cluster). Fixed in
+`get_optimal_E()` and in the pre-existing `EmbedDimension()` calls in
+`par_calc_all_xmaps()`/`calc_all_xmaps()`.
+
 ## Multivariate CCM / MXMap (`multi_pcm()`, `prune_indirect_edges()`)
 
 ### What it does
