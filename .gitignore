@@ -51,3 +51,6 @@ rsconnect/
 # Data files
 data/*.csv
 
+# Generated figures
+figures/
+

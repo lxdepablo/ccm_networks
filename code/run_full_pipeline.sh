@@ -50,6 +50,12 @@ date
 
 # 5. compare the pairwise/bootstrap/multivariate networks against each
 #    other - which edges each pruning step removed, and network-level stats
-#    for all three.
+#    for all three. Writes data/network_stats_comparison.csv.
 Rscript compare_networks.R
+date
+
+# 6. save figures summarizing everything above (CCM convergence, the three
+#    networks per site, edge counts and network stats by approach, S-map
+#    interaction strengths, causal vs. trophic metaweb) to figures/.
+Rscript make_figures.R
 date
