@@ -52,12 +52,18 @@ edge_lists <- bind_rows(lapply(unique(valid_xmaps$site), function(s){
   # build edge list
   edge_list <- bind_rows(lapply(1:nrow(final_cors), function(i){
     curr_row <- final_cors[i, ]
-    # separate xmap column into two nodes
+    # separate xmap column into two nodes. CCM()'s "node_1:node_2" column is
+    # the skill of using node_1's manifold to predict node_2 - CCM's classic
+    # (and here empirically verified, see log.md) result is that a high score
+    # for that direction means node_2's dynamics are recoverable from
+    # node_1's manifold because node_2 causally drives node_1, i.e. the score
+    # supports node_2 -> node_1, not node_1 -> node_2. So the edge is drawn
+    # cause (node_2) -> effect (node_1), reversed from the raw column name.
     split <- strsplit(curr_row$xmap, split = ":")[[1]]
     node_1 <- split[1]
     node_2 <- split[2]
 
-    data.frame(sp1 = node_1, sp2 = node_2, weight = curr_row$skill)
+    data.frame(sp1 = node_2, sp2 = node_1, weight = curr_row$skill)
   })) %>%
     # remove self edges, which show species temporal autocorrelation (not meaningful)
     filter(sp1 != sp2) %>%

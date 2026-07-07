@@ -340,17 +340,22 @@ filter_xmaps <- function(xmaps){
 #
 # NOTE ON EDGE ORIENTATION: par_calc_all_xmaps()/CCM() name their output
 # columns "A:B" for CCM(columns = A, target = B), i.e. "use A's manifold to
-# predict B". xmap_analysis.R splits that string on ":" and records the edge
-# as sp1 (= A) -> sp2 (= B). Empirically (see log.md), a high "A:B" score
-# means B's dynamics leave a footprint in A - i.e. it is the *effect* (A)
-# reconstructing the *cause* (B), so the causal claim actually supported by
-# a high "A:B" score is B -> A, the reverse of how the edge gets drawn. This
-# appears to be a pre-existing convention in the pipeline; we don't change it
-# here. Everything below is written in terms of "from_col" (= sp1 = the
-# manifold-building/columns variable) and "to_col" (= sp2 = the
-# target/reconstructed variable), matching edge_lists.csv literally, so it
-# plugs into the existing edge lists without needing to resolve which
-# variable is the "true" cause.
+# predict B". A high "A:B" score means B's dynamics leave a footprint in A -
+# i.e. it is the *effect* (A) reconstructing the *cause* (B) - so the causal
+# claim actually supported by a high "A:B" score is B -> A (verified
+# empirically, see log.md). xmap_analysis.R now draws the edge accordingly:
+# sp1 (= B = cause) -> sp2 (= A = effect), i.e. edge_lists.csv's sp1/sp2
+# already reflect the direction of causality, not the raw "columns:target"
+# order.
+#
+# Everything below therefore needs *two* different roles for an edge
+# sp1 -> sp2: sp1/sp2 as literal causal-graph endpoints (cause/effect) for
+# finding intermediate/mediator nodes by graph topology, versus from_col/
+# to_col for the actual Simplex calls, which must reconstruct the cause
+# (to_col) from the effect's manifold (from_col) - i.e. from_col = sp2,
+# to_col = sp1. Getting this backwards (from_col = sp1, to_col = sp2) would
+# silently retest the wrong direction now that sp1/sp2 mean cause/effect
+# instead of columns/target.
 # ---------------------------------------------------------------------------
 
 # get optimal embedding dimension for one variable pair (mirrors the E search
@@ -437,10 +442,13 @@ partial_cor <- function(x, y, z) {
 # Multivariate Partial Cross Mapping (multiPCM), after Zhang et al. 2025
 # (MXMap), Section 3.2 / Eq. 7.
 #
-# Tests whether the edge from_col -> to_col (as already established by
-# par_calc_all_xmaps/filter_xmaps) is direct, or fully explained by an
-# indirect path through `conds` (the other node(s) already sitting on a
-# 2-hop path from_col -> k -> to_col in the current graph).
+# Tests whether an edge is direct or fully explained by an indirect path
+# through `conds` (the other node(s) already sitting on a 2-hop path in the
+# current graph). Note the parameter names here are in *Simplex* terms, not
+# graph-edge terms: to_col is the variable being reconstructed (the cause,
+# in causal-graph terms) and from_col is the manifold/columns variable whose
+# reconstruction is being tested (the effect) - see prune_indirect_edges()
+# for how a graph edge cause -> effect maps onto this call.
 #
 # This is a genuine two-hop composition (NOT "reconstruct to_col directly
 # from the true conds values", which would over-prune real direct links
@@ -538,23 +546,29 @@ prune_indirect_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
   edge_df$n_conds <- 0L
 
   for (i in seq_len(nrow(edge_df))) {
-    from_col <- edge_df$sp1[i]
-    to_col <- edge_df$sp2[i]
+    # sp1/sp2 are true cause/effect (edge_lists.csv is now drawn in the
+    # direction of causality - see the NOTE ON EDGE ORIENTATION above), so
+    # graph topology (finding mediators) uses cause/effect directly...
+    cause <- edge_df$sp1[i]
+    effect <- edge_df$sp2[i]
 
-    # intermediates: nodes k with a from_col -> k edge AND a k -> to_col edge
+    # intermediates: nodes k with a cause -> k edge AND a k -> effect edge
     # already present in this site's graph (2-hop path)
-    from_children <- edge_df$sp2[edge_df$sp1 == from_col]
-    to_parents <- edge_df$sp1[edge_df$sp2 == to_col]
-    conds <- intersect(from_children, to_parents)
-    conds <- setdiff(conds, c(from_col, to_col))
+    cause_children <- edge_df$sp2[edge_df$sp1 == cause]
+    effect_parents <- edge_df$sp1[edge_df$sp2 == effect]
+    conds <- intersect(cause_children, effect_parents)
+    conds <- setdiff(conds, c(cause, effect))
     if (length(conds) > max_conds) conds <- conds[seq_len(max_conds)]
 
     if (length(conds) == 0) next
 
     edge_df$n_conds[i] <- length(conds)
 
+    # ...but multi_pcm()'s Simplex calls must reconstruct the cause from the
+    # effect's manifold (from_col = effect, to_col = cause), matching how
+    # this edge's apparent CCM score was actually computed.
     res <- tryCatch(
-      multi_pcm(ccm_data, from_col, to_col, conds, E = E_default, tau = tau, knn = knn),
+      multi_pcm(ccm_data, from_col = effect, to_col = cause, conds, E = E_default, tau = tau, knn = knn),
       error = function(e) list(rho_all = NA_real_, rho_direct = NA_real_, ratio = NA_real_)
     )
 
@@ -656,11 +670,14 @@ prune_nonsignificant_edges <- function(ccm_data, edge_df, E_default = NULL, tau 
   edge_df$pruned <- FALSE
 
   for (i in seq_len(nrow(edge_df))) {
-    from_col <- edge_df$sp1[i]
-    to_col <- edge_df$sp2[i]
+    # sp1/sp2 are cause/effect (see NOTE ON EDGE ORIENTATION above); the
+    # Simplex call needs to reconstruct the cause from the effect's manifold,
+    # i.e. from_col = effect (sp2), to_col = cause (sp1).
+    cause <- edge_df$sp1[i]
+    effect <- edge_df$sp2[i]
 
     res <- tryCatch(
-      bootstrap_ccm_significance(ccm_data, from_col, to_col, E = E_default, tau = tau,
+      bootstrap_ccm_significance(ccm_data, from_col = effect, to_col = cause, E = E_default, tau = tau,
                                   n_boot = n_boot, block_size = block_size,
                                   alpha = alpha, seed = seed),
       error = function(e) list(rho_obs = NA_real_, p_value = NA_real_, significant = NA)
