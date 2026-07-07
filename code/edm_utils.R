@@ -1,6 +1,71 @@
 library(furrr)
 library(tictoc)
 
+# prep one site's data into the wide, z-scored ccm_data format used by CCM,
+# do_smap, and (new) the bootstrap/multivariate pruning steps. Pulled out of
+# generate_xmaps.R so xmap_analysis.R can rebuild the same per-site time
+# series without duplicating this wrangling (and without re-running CCM).
+# Fixes a latent bug in the original inline version: survey_group is dropped
+# by the earlier `select(-survey_group)` (after `date` is derived from it),
+# so the later, duplicate `select(-survey_group)` would error - removed here.
+prep_site_ccm_data <- function(gom_raw, sst, site) {
+  curr_site_wide <- gom_raw %>%
+    # use only control plots
+    filter(site == !!site, plot == "C") %>%
+    # exclude double-counted species
+    filter(!(metric_type == "count" & species == "MYED")) %>%
+    # combine same-species observations within survey groups
+    group_by(survey_group, species) %>%
+    summarize(value_scaled = sum(value_scaled, na.rm = TRUE), .groups = "drop") %>%
+    # add time column
+    mutate(date = my(survey_group)) %>%
+    arrange(date) %>%
+    select(-survey_group) %>%
+    # drop species with < n observations
+    group_by(species) %>%
+    filter(sum(value_scaled != 0, na.rm = TRUE) >= 3) %>%
+    ungroup() %>%
+    # backfill zeroes before scaling: make all species x dates explicit
+    complete(date, species, fill = list(value_scaled = 0)) %>%
+    # z score each species
+    group_by(species) %>%
+    mutate(value_z = as.numeric(scale(value_scaled))) %>%
+    ungroup() %>%
+    # guard against species with zero variance
+    mutate(value_z = replace_na(value_z, 0)) %>%
+    select(date, species, value_z) %>%
+    # make wide (use value_z)
+    pivot_wider(
+      id_cols     = date,
+      names_from  = species,
+      values_from = value_z
+    ) %>%
+    # backfill missing species observations with 0's
+    replace(is.na(.), 0)
+
+  # bring in temperature data
+  sst_z <- sst %>%
+    mutate(date = as.Date(date)) %>%
+    select(date, sst) %>%
+    arrange(date) %>%
+    mutate(
+      sst = as.numeric(sst),
+      sst_z = as.numeric(scale(sst)),
+      sst_z = ifelse(is.na(sst_z), 0, sst_z)
+    ) %>%
+    select(date, sst = sst_z)
+
+  curr_site_wide <- curr_site_wide %>%
+    left_join(sst_z, by = "date") %>%
+    mutate(sst = replace_na(sst, 0))
+
+  curr_site_wide %>%
+    ungroup() %>%
+    clean_names() %>%
+    arrange(date) %>%
+    relocate(date)
+}
+
 # generalized lotka volterra
 gLV_model <- odin::odin({
   # initial conditions
@@ -267,6 +332,347 @@ filter_xmaps <- function(xmaps){
   valid_xmaps <- xmaps_filtered %>%
     # if correlation > 0 and ddy/dx < 0, xmap is valid
     filter(xmap %in% valid_xmap_list$xmap)
+}
+
+# ---------------------------------------------------------------------------
+# Bootstrapping to prune false-positive xmaps (block_bootstrap() above was
+# defined but never wired in - this is that wiring).
+#
+# NOTE ON EDGE ORIENTATION: par_calc_all_xmaps()/CCM() name their output
+# columns "A:B" for CCM(columns = A, target = B), i.e. "use A's manifold to
+# predict B". xmap_analysis.R splits that string on ":" and records the edge
+# as sp1 (= A) -> sp2 (= B). Empirically (see log.md), a high "A:B" score
+# means B's dynamics leave a footprint in A - i.e. it is the *effect* (A)
+# reconstructing the *cause* (B), so the causal claim actually supported by
+# a high "A:B" score is B -> A, the reverse of how the edge gets drawn. This
+# appears to be a pre-existing convention in the pipeline; we don't change it
+# here. Everything below is written in terms of "from_col" (= sp1 = the
+# manifold-building/columns variable) and "to_col" (= sp2 = the
+# target/reconstructed variable), matching edge_lists.csv literally, so it
+# plugs into the existing edge lists without needing to resolve which
+# variable is the "true" cause.
+# ---------------------------------------------------------------------------
+
+# get optimal embedding dimension for one variable pair (mirrors the E search
+# already used in par_calc_all_xmaps, exposed standalone so it can be re-run
+# for just the small set of edges that survive filtering)
+get_optimal_E <- function(data, from_col, to_col, maxE = 10, lib = NULL, pred = NULL) {
+  if (is.null(lib)) lib <- c(1, nrow(data) - 2)
+  if (is.null(pred)) pred <- lib
+
+  e_df <- EmbedDimension(
+    dataFrame = data,
+    lib = lib,
+    pred = pred,
+    columns = from_col,
+    target = to_col,
+    maxE = maxE
+  )
+
+  e_df$E[which.max(e_df$rho)]
+}
+
+# univariate cross-map reconstruction: reconstruct `to_col` using the delay
+# embedding of `from_col` (embedded = FALSE lets rEDM build the E-dim lag
+# embedding itself). Tp = 0 (contemporaneous) matches classic CCM.
+# knn defaults to rEDM's own E+1 when left at 0; MXMap's own experiments use
+# knn = 10 (see log.md), which is noticeably more robust for the chained
+# reconstructions multi_pcm() does below, at the cost of needing a large
+# enough library to have 10 neighbors to draw on.
+xmap_reconstruct <- function(data, from_col, to_col, E, tau = 1, lib = NULL, pred = NULL, knn = 0) {
+  lib_str <- if (is.null(lib)) paste(1, nrow(data)) else paste(lib, collapse = " ")
+  pred_str <- if (is.null(pred)) lib_str else paste(pred, collapse = " ")
+
+  Simplex(
+    dataFrame = data,
+    lib = lib_str,
+    pred = pred_str,
+    E = E,
+    tau = -abs(tau),
+    Tp = 0,
+    columns = from_col,
+    target = to_col,
+    embedded = FALSE,
+    knn = knn
+  )
+}
+
+# multivariate cross-map reconstruction: `from_cols` must already be columns
+# present in `data` (e.g. reconstructed intermediate series) forming the
+# state vector as-is, one dimension per column (embedded = TRUE means rEDM
+# does not build any further lags - see multi_pcm()'s "short series"
+# adaptation note in log.md).
+multi_xmap_reconstruct <- function(data, from_cols, to_col, lib = NULL, pred = NULL, knn = 0) {
+  lib_str <- if (is.null(lib)) paste(1, nrow(data)) else paste(lib, collapse = " ")
+  pred_str <- if (is.null(pred)) lib_str else paste(pred, collapse = " ")
+
+  Simplex(
+    dataFrame = data,
+    lib = lib_str,
+    pred = pred_str,
+    E = length(from_cols),
+    Tp = 0,
+    columns = paste(from_cols, collapse = " "),
+    target = to_col,
+    embedded = TRUE,
+    knn = knn
+  )
+}
+
+# partial correlation of x and y, controlling for z
+partial_cor <- function(x, y, z) {
+  ok <- complete.cases(x, y, z)
+  x <- x[ok]; y <- y[ok]; z <- z[ok]
+  if (length(x) < 4) return(NA_real_)
+
+  rxy <- suppressWarnings(cor(x, y))
+  rxz <- suppressWarnings(cor(x, z))
+  ryz <- suppressWarnings(cor(y, z))
+  denom <- sqrt((1 - rxz^2) * (1 - ryz^2))
+  if (is.na(denom) || denom <= 0) return(NA_real_)
+
+  (rxy - rxz * ryz) / denom
+}
+
+# Multivariate Partial Cross Mapping (multiPCM), after Zhang et al. 2025
+# (MXMap), Section 3.2 / Eq. 7.
+#
+# Tests whether the edge from_col -> to_col (as already established by
+# par_calc_all_xmaps/filter_xmaps) is direct, or fully explained by an
+# indirect path through `conds` (the other node(s) already sitting on a
+# 2-hop path from_col -> k -> to_col in the current graph).
+#
+# This is a genuine two-hop composition (NOT "reconstruct to_col directly
+# from the true conds values", which would over-prune real direct links
+# whenever conds also happens to correlate with to_col):
+#   1. apparent:    to_col reconstructed from from_col's manifold
+#   2. conds "seen" from_col's manifold: each intermediate reconstructed from
+#      from_col (this is the X2 -> Conds hop in Eq. 7)
+#   3. conditioned:  to_col reconstructed from that *reconstructed* conds
+#      block (the Conds -> X1 hop)
+#   4. rho_direct = partial correlation of (to_col, apparent-reconstruction)
+#      controlling for (conditioned-reconstruction)
+#
+# ADAPTATION FOR SHORT ECOLOGICAL SERIES (see log.md): the paper stacks a
+# full E-dim lag embedding per conditioning variable (multiSSR, Eq. 6). With
+# ~26 timepoints per site that blows up the conditioned manifold's
+# dimensionality far past what the library can support, so here each
+# conditioning variable contributes a single (unlagged) reconstructed value
+# to the conditioned block instead of a full E-dim lag stack. This keeps the
+# conditioned embedding dimension equal to length(conds) regardless of E.
+#
+# CALIBRATION CAVEAT (see log.md): validated on simulated chain systems, this
+# two-hop composition reliably ranks a genuinely indirect edge's ratio below
+# a genuinely direct edge's ratio, but the *absolute* ratio values (and thus
+# how well the paper's own gamma_threshold = 0.45 transfers) depend on
+# coupling strength, series length, and knn - the paper itself notes the
+# threshold needs re-calibrating per system (Appendix C). knn defaults to 10
+# (the paper's own choice) since chained reconstruction is noise-sensitive.
+multi_pcm <- function(data, from_col, to_col, conds, E = NULL, tau = 1,
+                       lib = NULL, pred = NULL, knn = 10) {
+  conds <- setdiff(unique(conds), c(from_col, to_col))
+  if (length(conds) == 0) {
+    return(list(rho_all = NA_real_, rho_direct = NA_real_, ratio = NA_real_,
+                decision = "keep", reason = "no intermediate nodes"))
+  }
+
+  if (is.null(E)) E <- max(3, length(conds))
+
+  # 1. apparent cross map: from_col -> to_col
+  # (Simplex()'s output always names its first column after whatever the
+  # index column in `data` was called, e.g. "date" - not literally "time" -
+  # so we address it positionally via [[1]] rather than by name.)
+  apparent <- xmap_reconstruct(data, from_col, to_col, E = E, tau = tau, lib = lib, pred = pred, knn = knn)
+  rho_all <- abs(suppressWarnings(cor(apparent$Observations, apparent$Predictions, use = "complete.obs")))
+
+  # 2. reconstruct each intermediate from from_col's manifold (X2 -> Conds)
+  conds_recon <- lapply(conds, function(cvar) {
+    xmap_reconstruct(data, from_col, cvar, E = E, tau = tau, lib = lib, pred = pred, knn = knn)$Predictions
+  })
+  names(conds_recon) <- conds
+
+  # Simplex treats a dataFrame's *first* column as the time/index column, so
+  # that has to come first here too - otherwise it silently swallows one of
+  # the conds columns as if it were the index.
+  recon_df <- data.frame(time_idx = seq_along(apparent[[1]]))
+  recon_df <- cbind(recon_df, as.data.frame(conds_recon))
+  recon_df$to_col_true <- apparent$Observations
+
+  # 3. reconstruct to_col from the *reconstructed* conds block (Conds -> X1)
+  conditioned <- multi_xmap_reconstruct(recon_df, from_cols = conds, to_col = "to_col_true", knn = knn)
+
+  # 4. partial correlation, aligned on time (both apparent/conditioned were
+  # built from the same recon_df row order, so a positional index lines them
+  # up correctly even though Simplex may drop leading/trailing NA rows)
+  merged <- merge(
+    data.frame(time_idx = seq_along(apparent[[1]]), obs = apparent$Observations, pred_direct = apparent$Predictions),
+    data.frame(time_idx = conditioned[[1]], pred_conditioned = conditioned$Predictions),
+    by = "time_idx"
+  )
+  rho_direct <- abs(partial_cor(merged$obs, merged$pred_direct, merged$pred_conditioned))
+
+  ratio <- if (is.na(rho_direct) || is.na(rho_all) || rho_all == 0) NA_real_ else rho_direct / rho_all
+
+  list(rho_all = rho_all, rho_direct = rho_direct, ratio = ratio,
+       decision = NA_character_, reason = NA_character_)
+}
+
+# Phase 2 of MXMap: prune edges in a (single-site) edge list that are fully
+# explained by an indirect path, using multi_pcm().
+#
+# ADAPTATION: MXMap's Algorithm 1 conditions on *all* intermediate nodes
+# along any path between a parent/child pair. For short series we cap the
+# number of conditioning variables (max_conds) since the conditioned
+# embedding dimension grows with the number of intermediates - see log.md.
+#
+# gamma_threshold defaults to the paper's own value (0.45) but should be
+# recalibrated for this system/dataset (see log.md and Appendix C of the
+# paper, which makes the same point) - it is exposed as a parameter, not a
+# fixed constant, for exactly that reason.
+prune_indirect_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
+                                  gamma_threshold = 0.45, max_conds = 3, knn = 10) {
+  edge_df$ratio <- NA_real_
+  edge_df$rho_all <- NA_real_
+  edge_df$rho_direct <- NA_real_
+  edge_df$pruned <- FALSE
+  edge_df$n_conds <- 0L
+
+  for (i in seq_len(nrow(edge_df))) {
+    from_col <- edge_df$sp1[i]
+    to_col <- edge_df$sp2[i]
+
+    # intermediates: nodes k with a from_col -> k edge AND a k -> to_col edge
+    # already present in this site's graph (2-hop path)
+    from_children <- edge_df$sp2[edge_df$sp1 == from_col]
+    to_parents <- edge_df$sp1[edge_df$sp2 == to_col]
+    conds <- intersect(from_children, to_parents)
+    conds <- setdiff(conds, c(from_col, to_col))
+    if (length(conds) > max_conds) conds <- conds[seq_len(max_conds)]
+
+    if (length(conds) == 0) next
+
+    edge_df$n_conds[i] <- length(conds)
+
+    res <- tryCatch(
+      multi_pcm(ccm_data, from_col, to_col, conds, E = E_default, tau = tau, knn = knn),
+      error = function(e) list(rho_all = NA_real_, rho_direct = NA_real_, ratio = NA_real_)
+    )
+
+    edge_df$rho_all[i] <- res$rho_all
+    edge_df$rho_direct[i] <- res$rho_direct
+    edge_df$ratio[i] <- res$ratio
+    edge_df$pruned[i] <- !is.na(res$ratio) && res$ratio < gamma_threshold
+  }
+
+  edge_df
+}
+
+# ---------------------------------------------------------------------------
+# Block-permutation significance test for a single pairwise cross-map edge.
+#
+# H0: from_col and to_col are not dynamically coupled.
+#
+# An earlier version of this test block-*resampled* (with replacement) the
+# joint (from_col, to_col) pair via block_bootstrap(). That's wrong for a
+# null test in two ways, confirmed empirically against a known-independent
+# pair before this version was written (see log.md): (1) resampling the pair
+# jointly keeps from_col[i] paired with to_col[i] in every row, which
+# preserves - rather than breaks - any real coupling, so it structurally
+# cannot test "not coupled"; and (2) sampling blocks *with replacement*
+# creates duplicate blocks, and a duplicated point is its own nearest
+# neighbor in the simplex projection (distance 0, matching target), which
+# trivially inflates cross-map skill - worse with larger blocks, which is
+# exactly the monotonic inflation that was observed.
+#
+# This version instead permutes to_col's blocks *without* replacement
+# (block_permute() - every original block is used exactly once, just
+# reordered) while leaving from_col in its original order. That breaks the
+# temporal alignment between the two series (destroying real coupling, if
+# any) while preserving each series' own within-block autocorrelation, and
+# introduces no duplicate points. The edge is significant if the observed
+# rho exceeds most of this null distribution.
+# ---------------------------------------------------------------------------
+
+# permute a single vector's blocks (without replacement - a reordering, not
+# a resample) so autocorrelation within each block survives but the block
+# sequence itself is scrambled
+block_permute <- function(x, block_size = 10) {
+  N <- length(x)
+  block_id <- rep(seq_len(ceiling(N / block_size)), each = block_size, length.out = N)
+  blocks <- split(seq_len(N), block_id)
+  new_order <- unlist(blocks[sample(length(blocks))], use.names = FALSE)
+  x[new_order]
+}
+
+bootstrap_ccm_significance <- function(data, from_col, to_col, E = NULL, tau = 1,
+                                        n_boot = 200, block_size = 10,
+                                        alpha = 0.05, seed = NULL) {
+  if (!is.null(seed)) set.seed(seed)
+  if (is.null(E)) E <- get_optimal_E(data, from_col, to_col)
+
+  obs <- xmap_reconstruct(data, from_col, to_col, E = E, tau = tau)
+  rho_obs <- suppressWarnings(cor(obs$Observations, obs$Predictions, use = "complete.obs"))
+
+  null_rhos <- vapply(seq_len(n_boot), function(b) {
+    permuted <- data.frame(
+      time_idx = seq_len(nrow(data)),
+      x = data[[from_col]],
+      y = block_permute(data[[to_col]], block_size = block_size)
+    )
+    names(permuted)[2:3] <- c(from_col, to_col)
+    out <- tryCatch(
+      xmap_reconstruct(permuted, from_col, to_col, E = E, tau = tau),
+      error = function(e) NULL
+    )
+    if (is.null(out)) return(NA_real_)
+    suppressWarnings(cor(out$Observations, out$Predictions, use = "complete.obs"))
+  }, numeric(1))
+  null_rhos <- null_rhos[!is.na(null_rhos)]
+
+  p_value <- if (length(null_rhos) >= 10) {
+    (1 + sum(null_rhos >= rho_obs)) / (1 + length(null_rhos))
+  } else {
+    NA_real_
+  }
+
+  list(
+    rho_obs = rho_obs,
+    p_value = p_value,
+    n_null_valid = length(null_rhos),
+    significant = !is.na(p_value) && p_value < alpha
+  )
+}
+
+# Apply the bootstrap significance test to every edge in a (single-site)
+# edge list and flag/prune the ones that don't hold up. Meant to run
+# alongside/after filter_xmaps() (convergence-based screening) as an
+# additional, independent false-positive check - not a replacement.
+prune_nonsignificant_edges <- function(ccm_data, edge_df, E_default = NULL, tau = 1,
+                                        n_boot = 200, block_size = 10,
+                                        alpha = 0.05, seed = NULL) {
+  edge_df$rho_obs <- NA_real_
+  edge_df$p_value <- NA_real_
+  edge_df$significant <- NA
+  edge_df$pruned <- FALSE
+
+  for (i in seq_len(nrow(edge_df))) {
+    from_col <- edge_df$sp1[i]
+    to_col <- edge_df$sp2[i]
+
+    res <- tryCatch(
+      bootstrap_ccm_significance(ccm_data, from_col, to_col, E = E_default, tau = tau,
+                                  n_boot = n_boot, block_size = block_size,
+                                  alpha = alpha, seed = seed),
+      error = function(e) list(rho_obs = NA_real_, p_value = NA_real_, significant = NA)
+    )
+
+    edge_df$rho_obs[i] <- res$rho_obs
+    edge_df$p_value[i] <- res$p_value
+    edge_df$significant[i] <- res$significant
+    edge_df$pruned[i] <- isFALSE(res$significant)
+  }
+
+  edge_df
 }
 
 # find best theta value for S-map
